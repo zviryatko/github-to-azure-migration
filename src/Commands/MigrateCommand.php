@@ -207,19 +207,21 @@ final class MigrateCommand extends Command {
       return $this->userMap[$user];
     }
 
+    $data = [
+      'displayName' => $user,
+      'uniqueName' => $user,
+    ];
     $account = $this->source->user()->show($user);
     if (!empty($account)) {
-      return [
+      $data = [
         'displayName' => $account['name'] ?? $user,
         'uniqueName' => $account['login'] ?? $user,
         'imageUrl' => $account['avatar_url'],
         'url' => $account['url'],
       ];
     }
-    return [
-      'displayName' => $user,
-      'uniqueName' => $user,
-    ];
+    $this->userMap[$user] = $data;
+    return $this->userMap[$user];
   }
 
   /**
@@ -235,7 +237,7 @@ final class MigrateCommand extends Command {
   private function replaceIssueIds(string $content, array $issues, string $prefix, bool $link) {
     foreach ($issues as $old_id => [$new_id, $new_url]) {
       $replace = $link ? "<a href=\"$new_url\">#$new_id</a>" : "#$new_id";
-      preg_replace("/\b{$prefix}{$old_id}\b/", $replace, $content);
+      $content = preg_replace("/{$prefix}{$old_id}\b/", $replace, $content);
     }
     return $content;
   }
@@ -245,8 +247,8 @@ final class MigrateCommand extends Command {
    */
   protected function execute(InputInterface $input, OutputInterface $output) {
     $milestones = $this->migrateMilestones($output);
-    $issues = $this->migrateIssues($output, $milestones);
-    $this->migratePullRequests($output, $issues);
+    $issues = $this->migrateIssues($output, $milestones ?? []);
+    $this->migratePullRequests($output, $issues ?? []);
     return Command::SUCCESS;
   }
 
@@ -304,21 +306,6 @@ final class MigrateCommand extends Command {
     ]);
 
     return $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, 'Epic', '6.0', 'False', 'True', 'True');
-  }
-
-  /**
-   * Add comment to work item..
-   *
-   * @param string $text
-   * @param string|array $author
-   * @param \FrankHouweling\AzureDevOpsClient\Wit\Model\WorkItem $workItem
-   */
-  private function createComment(string $text, $author, WorkItem $workItem): void {
-    $body = $this->prepareFields([
-      'System.History' => $text,
-      'System.ChangedBy' => $author,
-    ]);
-    $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
   }
 
   /**
@@ -383,9 +370,13 @@ final class MigrateCommand extends Command {
     $body = $this->prepareFields([
       'System.Title' => $issue['title'],
       'System.CreatedDate' => $issue['created_at'],
+      'System.ChangedDate' => $issue['created_at'],
+      'Microsoft.VSTS.Common.StateChangeDate' => $issue['created_at'],
+      'System.AuthorizedDate' => $issue['created_at'],
       'System.CreatedBy' => !empty($issue['user']) ? $this->getLocalUser($issue['user']['login']) : NULL,
       'System.AssignedTo' => !empty($issue['assignee']) ? $this->getLocalUser($issue['assignee']['login']) : NULL,
-      'System.Description' => $this->replaceIssueIds($this->converter->convertToHtml((string) $issue['body'])->getContent(), $issues, '#', TRUE),
+      'System.Description' => $this->replaceIssueIds($this->converter->convertToHtml((string) $issue['body'])
+          ->getContent(), $issues, '#', TRUE) . sprintf("\n\n<div>Issue migrated from github <a href=\"%s\">#%s</a></div>", $issue['html_url'], $issue['number']),
       'System.Tags' => !empty($tags) ? implode('; ', $tags) : '',
     ]);
 
@@ -435,24 +426,33 @@ final class MigrateCommand extends Command {
 
     $workItem = $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $type, '6.0', 'False', 'True', 'True');
 
-    // Update issue state if closed.
-    if ($issue['state'] === 'closed') {
-      $ops = [
-        [
-          'op' => 'add',
-          'path' => "/fields/System.State",
-          'value' => 'Closed',
-        ]
-      ];
-      $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($ops, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
-    }
-
     // Add comments.
     if ($issue['comments'] > 0) {
       $this->migrateComments($issue, $workItem, $issues);
     }
+    // Update issue state if closed.
+    elseif ($issue['state'] === 'closed') {
+      $this->closeWorkItem($issue, $workItem);
+    }
 
     return $workItem;
+  }
+
+  /**
+   * Close Azure work item.
+   *
+   * @param array $issue
+   * @param \FrankHouweling\AzureDevOpsClient\Wit\Model\WorkItem $workItem
+   *
+   * @throws \FrankHouweling\AzureDevOpsClient\Wit\ApiException
+   */
+  private function closeWorkItem(array $issue, WorkItem $workItem) {
+    $ops = $this->prepareFields([
+      'System.State' => 'Closed',
+      'System.ChangedDate' => $issue['closed_at'],
+      'System.ChangedBy' => !empty($issue['user']) ? $this->getLocalUser($issue['user']['login']) : NULL,
+    ]);
+    $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($ops, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
   }
 
   /**
@@ -471,9 +471,17 @@ final class MigrateCommand extends Command {
         'page' => $page,
       ]);
       foreach ($comments as $comment) {
+        if ($issue['state'] === 'closed' && (new \DateTime($issue['closed_at']) < new \DateTime($comment['created_at']))) {
+          $this->closeWorkItem($issue, $workItem);
+        }
         $text = $this->replaceIssueIds($this->converter->convertToHtml((string) $comment['body'])->getContent(), $issues, '#', TRUE);
         $author = $this->getLocalUser($comment['user']['login']);
-        $this->createComment($text, $author, $workItem);
+        $body = $this->prepareFields([
+          'System.History' => $text,
+          'System.ChangedBy' => $author,
+          'System.ChangedDate' => $comment['created_at'],
+        ]);
+        $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
       }
       $page++;
     } while (!empty($comments));
