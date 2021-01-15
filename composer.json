@@ -1,0 +1,29 @@
+{
+    "name": "zviryatko/github-to-azure-migration",
+    "description": "Migrate issues from Github to Azure DevOps.",
+    "type": "project",
+    "require": {
+        "symfony/console": "^5.0",
+        "knplabs/github-api": "^3.0",
+        "guzzlehttp/guzzle": "^7.0.1",
+        "http-interop/http-factory-guzzle": "^1.0",
+        "symfony/dotenv": "^5.0",
+        "league/commonmark": "2.0.x-dev",
+        "frank-houweling/azure-dev-ops-client": "^0.14",
+        "ext-json": "*"
+    },
+    "license": "GPLv3",
+    "authors": [
+        {
+            "name": "Alex Davyskiba",
+            "email": "sanya.davyskiba@gmail.com"
+        }
+    ],
+    "autoload": {
+      "psr-4": {
+        "zviryatko\\Github2Azure\\": "./src"
+      }
+    },
+    "bin": ["bin/github2azure"],
+    "minimum-stability": "dev"
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env php
+<?php
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Symfony\Component\Console\Application;
+use Symfony\Component\Dotenv\Dotenv;
+use zviryatko\Github2Azure\Commands\MigrateCommand;
+
+$dotenv = new Dotenv();
+$dotenv->usePutenv(TRUE);
+$dotenv->loadEnv(dirname(__DIR__) . '/.env');
+
+$application = new Application('github2azure', '0.0.1');
+$application->add(new MigrateCommand());
+$application->run();
