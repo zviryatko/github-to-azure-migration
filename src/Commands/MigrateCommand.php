@@ -427,11 +427,19 @@ final class MigrateCommand extends Command {
     $workItem = $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $type, '6.0', 'False', 'True', 'True');
 
     // Add comments.
+    $closed = FALSE;
     if ($issue['comments'] > 0) {
-      $this->migrateComments($issue, $workItem, $issues);
+      $this->migrateComments($issue, $workItem, $issues, function (array $comment, callable $next) use ($issue, $workItem, &$closed) {
+        // It's not allowed to update items with forcing ChangedDate in non historical order, put close event somewhere between comments.
+        if ($issue['state'] === 'closed' && (new \DateTime($issue['closed_at']) < new \DateTime($comment['created_at']))) {
+          $this->closeWorkItem($issue, $workItem);
+          $closed = TRUE;
+        }
+        $next($comment);
+      });
     }
-    // Update issue state if closed.
-    elseif ($issue['state'] === 'closed') {
+    // Close at the end if it's not yet done.
+    if ($issue['state'] === 'closed' && !$closed) {
       $this->closeWorkItem($issue, $workItem);
     }
 
@@ -461,8 +469,10 @@ final class MigrateCommand extends Command {
    * @param array $issue
    * @param \FrankHouweling\AzureDevOpsClient\Wit\Model\WorkItem $workItem
    * @param array $issues
+   * @param callable $callback
+   *   Accepts two arguments: array $comment, callable $next
    */
-  private function migrateComments(array $issue, WorkItem $workItem, array $issues): void {
+  private function migrateComments(array $issue, WorkItem $workItem, array $issues, callable $callback): void {
     $per_page = 10;
     $page = 1;
     do {
@@ -471,17 +481,16 @@ final class MigrateCommand extends Command {
         'page' => $page,
       ]);
       foreach ($comments as $comment) {
-        if ($issue['state'] === 'closed' && (new \DateTime($issue['closed_at']) < new \DateTime($comment['created_at']))) {
-          $this->closeWorkItem($issue, $workItem);
-        }
-        $text = $this->replaceIssueIds($this->converter->convertToHtml((string) $comment['body'])->getContent(), $issues, '#', TRUE);
-        $author = $this->getLocalUser($comment['user']['login']);
-        $body = $this->prepareFields([
-          'System.History' => $text,
-          'System.ChangedBy' => $author,
-          'System.ChangedDate' => $comment['created_at'],
-        ]);
-        $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
+        $callback($comment, function(array $comment) use ($issue, $issues, $workItem) {
+          $text = $this->replaceIssueIds($this->converter->convertToHtml((string) $comment['body'])->getContent(), $issues, '#', TRUE);
+          $author = $this->getLocalUser($comment['user']['login']);
+          $body = $this->prepareFields([
+            'System.History' => $text,
+            'System.ChangedBy' => $author,
+            'System.ChangedDate' => $comment['created_at'],
+          ]);
+          $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
+        });
       }
       $page++;
     } while (!empty($comments));
