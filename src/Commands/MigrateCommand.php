@@ -14,7 +14,8 @@ use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Query;
-use League\CommonMark\CommonMarkConverter;
+use League\CommonMark\GithubFlavoredMarkdownConverter;
+use League\CommonMark\MarkdownConverter;
 use Psr\Http\Message\RequestInterface;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -40,9 +41,9 @@ final class MigrateCommand extends Command {
   /**
    * Markdown converter.
    *
-   * @var \League\CommonMark\CommonMarkConverter
+   * @var \League\CommonMark\MarkdownConverter
    */
-  private CommonMarkConverter $converter;
+  private MarkdownConverter $converter;
 
   /**
    * Azure DevOps host.
@@ -133,7 +134,23 @@ final class MigrateCommand extends Command {
       $map = array_combine(array_column($csv, 0), array_column($csv, 1));
       $this->userMap = array_map('trim', $map);
     }
-    $this->converter = new CommonMarkConverter();
+    $this->converter = new GithubFlavoredMarkdownConverter([
+      'renderer' => [
+        'block_separator' => "\n",
+        'inner_separator' => "<br>",
+        'soft_break' => "<br>",
+      ],
+      'commonmark' => [
+        'enable_em' => TRUE,
+        'enable_strong' => TRUE,
+        'use_asterisk' => TRUE,
+        'use_underscore' => TRUE,
+        'unordered_list_markers' => ['-', '*', '+'],
+      ],
+      'html_input' => 'allow',
+      'allow_unsafe_links' => TRUE,
+      'max_nesting_level' => PHP_INT_MAX,
+    ]);
     $this->targetHost = getenv('AZURE_HOST');
     $this->targetOrg = getenv('AZURE_ORG');
     $this->targetRepo = getenv('AZURE_REPO');
@@ -777,7 +794,7 @@ final class MigrateCommand extends Command {
   }
 
   private function prepareDescription(string $body): string {
-    return nl2br($this->converter->convertToHtml($body)->getContent());
+    return $this->converter->convertToHtml($body)->getContent();
   }
 
 }
