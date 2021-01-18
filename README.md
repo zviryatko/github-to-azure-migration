@@ -6,8 +6,7 @@ Things that was out of scope, but it's still possible to implement:
  - it will not sync issues between, so it's only one time migration
  - it will not create users, all related users must be creat upfront
  - it will not sync/upload attachments to Azure
- - it will not update all internal links like "Some issue #123" to new Azure issue, it is done partly
- - changed/created date missing because of some limitations of Azure api
+ - it will not update all internal links like "Some issue #123" to new Azure issue, it is done partly only when old ticket referenced in new one, but not vice versa
 
 Every failed try requires wipe on Azure DevOps, see Wipe section.
 
@@ -50,6 +49,27 @@ Edit `usermap.csv` and keep the original format: `github-username, Azure User Na
 It is needed because migration of user accounts is out of scope of this migration tool.
 
 Also Github API doesn't allow extracting real user emails, but only username.
+
+### Permissions
+
+The api use should have next permissions allowed:
+- **General**: Suppress notifications for work item updates
+- **Boards**: Bypass rules on work item updates
+- **Boards**: Delete and restore work items
+- **Boards**: Permanently delete work items
+
+*last two needed for deleting wrongly imported issues. 
+
+### Project Process
+
+This migration script uses three types of issue types: Epic, User Story and Bug.
+
+So Github issues migrated to referenced type by next rules:
+- Milestone > Epic
+- Issue -> User Story
+- Issue (with tag "bug") > Bug
+
+Most likely you need to change Process to Agile, it can be done through Project settings > General > Overview > Process
 
 ## Copy target repository to Azure
 

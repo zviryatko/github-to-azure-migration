@@ -19,7 +19,6 @@ use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
-use function GuzzleHttp\Psr7\parse_query;
 
 /**
  * Export Github issues into csv file.
@@ -43,6 +42,11 @@ final class MigrateCommand extends Command {
    * @var \League\CommonMark\CommonMarkConverter
    */
   private CommonMarkConverter $converter;
+
+  /**
+   * Azure DevOps host.
+   */
+  private string $targetHost;
 
   /**
    * Azure DevOps organization.
@@ -129,7 +133,7 @@ final class MigrateCommand extends Command {
       $this->userMap = array_map('trim', $map);
     }
     $this->converter = new CommonMarkConverter();
-
+    $this->targetHost = getenv('AZURE_HOST');
     $this->targetOrg = getenv('AZURE_ORG');
     $this->targetRepo = getenv('AZURE_REPO');
 
@@ -155,12 +159,14 @@ final class MigrateCommand extends Command {
       $guzzle,
       \FrankHouweling\AzureDevOpsClient\Wit\Configuration::getDefaultConfiguration()
         ->setUsername(getenv('AZURE_USER'))
-        ->setPassword(getenv('AZURE_TOKEN')),
+        ->setPassword(getenv('AZURE_TOKEN'))
+        ->setHost($this->targetHost),
       $headerSelection,
     );
     $gitConfig = \FrankHouweling\AzureDevOpsClient\Git\Configuration::getDefaultConfiguration()
       ->setUsername(getenv('AZURE_USER'))
-      ->setPassword(getenv('AZURE_TOKEN'));
+      ->setPassword(getenv('AZURE_TOKEN'))
+      ->setHost($this->targetHost);
     $this->commitsApi = new CommitsApi(
       $guzzle,
       $gitConfig,
@@ -334,9 +340,9 @@ final class MigrateCommand extends Command {
         try {
           $workItem = $this->createWorkItemFromIssue($issue, $milestones, $results);
           $output->writeln(sprintf('<info>Migrated issue "%d" to User Story "%d" with %d comments.</info>', $issue['number'], $workItem->getId(), $issue['comments']));
-          $results[$issue['number']] = [$workItem->getId(), $workItem->getUrl()];
-        } catch (\Exception $e) {
-          $output->writeln(sprintf('<error>Failed to migrate issue "%d" with next error: "%s".</error>', $issue['number'], $e->getMessage()));
+          $results[$issue['number']] = [$workItem->getId(), $this->buildWorkItemHtmlUrl($workItem)];
+        } catch (\FrankHouweling\AzureDevOpsClient\Wit\ApiException $e) {
+          $output->writeln(sprintf('<error>Failed to migrate issue "%d" with next error: "%s".</error>', $issue['number'], json_decode($e->getResponseBody())->message));
         }
       }
       $page++;
@@ -361,10 +367,13 @@ final class MigrateCommand extends Command {
         $tags[] = trim($label['name']);
       }
     }
+    $descriptionField = 'System.Description';
     // Remove tag "bug" and set type Bug.
     if (in_array('bug', array_map('strtolower', $tags))) {
       unset($tags[array_search('bug', $tags)]);
       $type = 'Bug';
+      // Bugs doesn't have Description, but instead they have Reproduce Steps field.
+      $descriptionField = 'Microsoft.VSTS.TCM.ReproSteps';
     }
 
     $body = $this->prepareFields([
@@ -375,7 +384,7 @@ final class MigrateCommand extends Command {
       'System.AuthorizedDate' => $issue['created_at'],
       'System.CreatedBy' => !empty($issue['user']) ? $this->getLocalUser($issue['user']['login']) : NULL,
       'System.AssignedTo' => !empty($issue['assignee']) ? $this->getLocalUser($issue['assignee']['login']) : NULL,
-      'System.Description' => $this->replaceIssueIds($this->converter->convertToHtml((string) $issue['body'])
+      $descriptionField => $this->replaceIssueIds($this->converter->convertToHtml((string) $issue['body'])
           ->getContent(), $issues, '#', TRUE) . sprintf("\n\n<div>Issue migrated from github <a href=\"%s\">#%s</a></div>", $issue['html_url'], $issue['number']),
       'System.Tags' => !empty($tags) ? implode('; ', $tags) : '',
     ]);
@@ -424,14 +433,14 @@ final class MigrateCommand extends Command {
       ];
     }
 
-    $workItem = $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $type, '6.0', 'False', 'True', 'True');
+    $workItem = $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $type, '6.0', 'False', 'True', 'True', 'All');
 
     // Add comments.
     $closed = FALSE;
     if ($issue['comments'] > 0) {
       $this->migrateComments($issue, $workItem, $issues, function (array $comment, callable $next) use ($issue, $workItem, &$closed) {
         // It's not allowed to update items with forcing ChangedDate in non historical order, put close event somewhere between comments.
-        if ($issue['state'] === 'closed' && (new \DateTime($issue['closed_at']) < new \DateTime($comment['created_at']))) {
+        if ($issue['state'] === 'closed' && !$closed && (new \DateTime($issue['closed_at']) < new \DateTime($comment['created_at']))) {
           $this->closeWorkItem($issue, $workItem);
           $closed = TRUE;
         }
@@ -555,8 +564,8 @@ final class MigrateCommand extends Command {
 
           $output->writeln(sprintf('<info>Migrated PR "%d" to "%d" with %d comments and %d reviews.</info>', $pr['number'], $prItem->getPullRequestId(), $comments, $reviews));
           $results[$pr['number']] = $prItem->getUrl();
-        } catch (\Exception $e) {
-          $output->writeln(sprintf('<error>Failed to migrate PR "%d" with next error: "%s".</error>', $pr['number'], $e->getMessage()));
+        } catch (\FrankHouweling\AzureDevOpsClient\Git\ApiException $e) {
+          $output->writeln(sprintf('<error>Failed to migrate PR "%d" with next error: "%s".</error>', $pr['number'], json_decode($e->getResponseBody())->message));
         }
       }
       $page++;
@@ -731,6 +740,17 @@ final class MigrateCommand extends Command {
       $page++;
     } while (!empty($reviews));
     return $i;
+  }
+
+  /**
+   * Build html url from work item.
+   *
+   * @param \FrankHouweling\AzureDevOpsClient\Wit\Model\WorkItem $workItem
+   *
+   * @return string
+   */
+  private function buildWorkItemHtmlUrl(WorkItem $workItem): string {
+    return "{$this->targetHost}/{$this->targetOrg}/{$this->targetRepo}/_workitems/edit/{$workItem->getId()}";
   }
 
 }
