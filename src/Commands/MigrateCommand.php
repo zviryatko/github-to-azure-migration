@@ -10,6 +10,7 @@ use FrankHouweling\AzureDevOpsClient\Wit\Api\WorkItemsApi;
 use FrankHouweling\AzureDevOpsClient\Wit\Model\WorkItem;
 use GuzzleHttp\Client as GuzzleClient;
 use Github\Client as GithubClient;
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Query;
@@ -138,6 +139,25 @@ final class MigrateCommand extends Command {
     $this->targetRepo = getenv('AZURE_REPO');
 
     $handler = HandlerStack::create();
+    // Sometimes Azure API returns 503, so lets add one retry!
+    $handler->push(Middleware::retry(function (int $retries, RequestInterface $request, $response = NULL, $exception = NULL) use ($output) {
+      if ($retries >= 1) {
+        return FALSE;
+      }
+      if (!($response && $response->getStatusCode() >= 500)) {
+        return FALSE;
+      }
+      if (!($exception instanceof ConnectException)) {
+        return FALSE;
+      }
+      $output->writeln(sprintf(
+        '<error>Retrying %s %s, %s</error>',
+        $request->getMethod(),
+        $request->getUri(),
+        $response ? 'status code: ' . $response->getStatusCode() : (method_exists($exception, 'getResponseBody') ? json_decode($exception->getResponseBody())->message : $exception->getMessage())
+      ));
+      return TRUE;
+    }));
     $handler->push(Middleware::mapRequest(function(RequestInterface  $request) {
       $query = Query::parse($request->getUri()->getQuery());
       $query['bypassRules'] = 'True';
@@ -307,7 +327,7 @@ final class MigrateCommand extends Command {
       'System.CreatedDate' => $milestone['created_at'],
       'System.CreatedBy' => !empty($this->userMap[$milestone['creator']['login']]) ? $this->userMap[$milestone['creator']['login']] : '',
       'System.State' => 'New',
-      'System.Description' => $this->converter->convertToHtml((string) $milestone['description'])->getContent() .
+      'System.Description' => $this->prepareDescription((string) $milestone['description']) .
         sprintf("\n\n<p>Milestone migrated from Github: <a href=\"%s\">%d: %s</a></p>", $milestone['html_url'], $milestone['number'], $milestone['title']),
     ]);
 
@@ -343,6 +363,8 @@ final class MigrateCommand extends Command {
           $results[$issue['number']] = [$workItem->getId(), $this->buildWorkItemHtmlUrl($workItem)];
         } catch (\FrankHouweling\AzureDevOpsClient\Wit\ApiException $e) {
           $output->writeln(sprintf('<error>Failed to migrate issue "%d" with next error: "%s".</error>', $issue['number'], json_decode($e->getResponseBody())->message));
+        } catch (\Exception $e) {
+          $output->writeln(sprintf('<error>Failed to migrate issue "%d" with next error: "%s".</error>', $issue['number'], $e->getMessage()));
         }
       }
       $page++;
@@ -384,8 +406,7 @@ final class MigrateCommand extends Command {
       'System.AuthorizedDate' => $issue['created_at'],
       'System.CreatedBy' => !empty($issue['user']) ? $this->getLocalUser($issue['user']['login']) : NULL,
       'System.AssignedTo' => !empty($issue['assignee']) ? $this->getLocalUser($issue['assignee']['login']) : NULL,
-      $descriptionField => $this->replaceIssueIds($this->converter->convertToHtml((string) $issue['body'])
-          ->getContent(), $issues, '#', TRUE) . sprintf("\n\n<div>Issue migrated from github <a href=\"%s\">#%s</a></div>", $issue['html_url'], $issue['number']),
+      $descriptionField => $this->replaceIssueIds($this->prepareDescription((string) $issue['body']), $issues, '#', TRUE) . sprintf("\n\n<div>Issue migrated from github <a href=\"%s\">#%s</a></div>", $issue['html_url'], $issue['number']),
       'System.Tags' => !empty($tags) ? implode('; ', $tags) : '',
     ]);
 
@@ -491,7 +512,7 @@ final class MigrateCommand extends Command {
       ]);
       foreach ($comments as $comment) {
         $callback($comment, function(array $comment) use ($issue, $issues, $workItem) {
-          $text = $this->replaceIssueIds($this->converter->convertToHtml((string) $comment['body'])->getContent(), $issues, '#', TRUE);
+          $text = $this->replaceIssueIds($this->prepareDescription((string) $comment['body']), $issues, '#', TRUE);
           $author = $this->getLocalUser($comment['user']['login']);
           $body = $this->prepareFields([
             'System.History' => $text,
@@ -566,6 +587,8 @@ final class MigrateCommand extends Command {
           $results[$pr['number']] = $prItem->getUrl();
         } catch (\FrankHouweling\AzureDevOpsClient\Git\ApiException $e) {
           $output->writeln(sprintf('<error>Failed to migrate PR "%d" with next error: "%s".</error>', $pr['number'], json_decode($e->getResponseBody())->message));
+        } catch (\Exception $e) {
+          $output->writeln(sprintf('<error>Failed to migrate PR "%d" with next error: "%s".</error>', $pr['number'], $e->getMessage()));
         }
       }
       $page++;
@@ -582,7 +605,7 @@ final class MigrateCommand extends Command {
    * @return \FrankHouweling\AzureDevOpsClient\Git\Model\GitPullRequest
    */
   private function createPullRequest(array $pr, array $issues): GitPullRequest {
-    $strings = mb_str_split($this->replaceIssueIds($this->converter->convertToHtml($pr['body'])->getContent(), $issues, '#', TRUE), 4000);
+    $strings = mb_str_split($this->replaceIssueIds($this->prepareDescription($pr['body']), $issues, '#', TRUE), 4000);
     $description = array_shift($strings);
     $body = [
       'sourceRefName' => "refs/heads/{$pr['head']['ref']}",
@@ -638,7 +661,7 @@ final class MigrateCommand extends Command {
           'comments' => [
             [
               'parentCommentId' => 0,
-              'content' => $this->replaceIssueIds($this->converter->convertToHtml((string) $comment['body'])->getContent(), $issues, '#', TRUE),
+              'content' => $this->replaceIssueIds($this->prepareDescription((string) $comment['body']), $issues, '#', TRUE),
               'author' => $this->getLocalUser($pr['user']['login']),
               'publishedDate' => $comment['created_at'],
               'commentType' => 1,
@@ -680,7 +703,7 @@ final class MigrateCommand extends Command {
             'comments' => [
               [
                 'parentCommentId' => 0,
-                'content' => $this->replaceIssueIds($this->converter->convertToHtml((string) $review['body'])->getContent(), $issues, '#', TRUE),
+                'content' => $this->replaceIssueIds($this->prepareDescription((string) $review['body']), $issues, '#', TRUE),
                 'author' => $this->getLocalUser($pr['user']['login']),
                 'publishedDate' => $review['submitted_at'],
                 'commentType' => 1,
@@ -714,7 +737,7 @@ final class MigrateCommand extends Command {
             'comments' => [
               [
                 'parentCommentId' => 0,
-                'content' => $this->replaceIssueIds($this->converter->convertToHtml((string) $comment['body'])->getContent(), $issues, '#', TRUE),
+                'content' => $this->replaceIssueIds($this->prepareDescription((string) $comment['body']), $issues, '#', TRUE),
                 'author' => $this->getLocalUser($pr['user']['login']),
                 'publishedDate' => $comment['created_at'],
                 'commentType' => 1,
@@ -751,6 +774,10 @@ final class MigrateCommand extends Command {
    */
   private function buildWorkItemHtmlUrl(WorkItem $workItem): string {
     return "{$this->targetHost}/{$this->targetOrg}/{$this->targetRepo}/_workitems/edit/{$workItem->getId()}";
+  }
+
+  private function prepareDescription(string $body): string {
+    return nl2br($this->converter->convertToHtml($body)->getContent());
   }
 
 }
