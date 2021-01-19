@@ -58,6 +58,11 @@ final class MigrateCommand extends Command {
   /**
    * Azure DevOps project.
    */
+  private string $targetProject;
+
+  /**
+   * Azure DevOps repository.
+   */
   private string $targetRepo;
 
   /**
@@ -153,6 +158,7 @@ final class MigrateCommand extends Command {
     ]);
     $this->targetHost = getenv('AZURE_HOST');
     $this->targetOrg = getenv('AZURE_ORG');
+    $this->targetProject = getenv('AZURE_PROJECT');
     $this->targetRepo = getenv('AZURE_REPO');
 
     $handler = HandlerStack::create();
@@ -348,7 +354,7 @@ final class MigrateCommand extends Command {
         sprintf("\n\n<p>Milestone migrated from Github: <a href=\"%s\">%d: %s</a></p>", $milestone['html_url'], $milestone['number'], $milestone['title']),
     ]);
 
-    return $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, 'Epic', '6.0', 'False', 'True', 'True');
+    return $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetProject, 'Epic', '6.0', 'False', 'True', 'True');
   }
 
   /**
@@ -471,7 +477,7 @@ final class MigrateCommand extends Command {
       ];
     }
 
-    $workItem = $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $type, '6.0', 'False', 'True', 'True', 'All');
+    $workItem = $this->workItemsApi->workItemsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetProject, $type, '6.0', 'False', 'True', 'True', 'All');
 
     // Add comments.
     $closed = FALSE;
@@ -507,7 +513,7 @@ final class MigrateCommand extends Command {
       'System.ChangedDate' => $issue['closed_at'],
       'System.ChangedBy' => !empty($issue['user']) ? $this->getLocalUser($issue['user']['login']) : NULL,
     ]);
-    $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($ops, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
+    $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($ops, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetProject, '6.0', 'False', 'True', 'True');
   }
 
   /**
@@ -536,7 +542,7 @@ final class MigrateCommand extends Command {
             'System.ChangedBy' => $author,
             'System.ChangedDate' => $comment['created_at'],
           ]);
-          $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetRepo, '6.0', 'False', 'True', 'True');
+          $this->workItemsApi->workItemsUpdate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $workItem->getId(), $this->targetProject, '6.0', 'False', 'True', 'True');
         });
       }
       $page++;
@@ -562,7 +568,7 @@ final class MigrateCommand extends Command {
           continue;
         }
         try {
-          $commitItem = $this->commitsApi->commitsGet($this->targetOrg, $event['commit_id'], $this->targetRepo, $this->targetRepo, '6.0');
+          $commitItem = $this->commitsApi->commitsGet($this->targetOrg, $event['commit_id'], $this->targetRepo, $this->targetProject, '6.0');
           $parts = explode('/', ltrim(parse_url($commitItem->getUrl(), PHP_URL_PATH), '/'));
           $commits[] = "vstfs:///Git/Commit/{$parts[1]}/{$parts[5]}/{$parts[7]}";
         } catch (\Exception $e) {
@@ -634,7 +640,7 @@ final class MigrateCommand extends Command {
       'isDraft' => $pr['draft'],
       'description' => $description,
     ];
-    $prItem = $this->pullRequestApi->pullRequestsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $this->targetRepo, '6.0', 'True');
+    $prItem = $this->pullRequestApi->pullRequestsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $this->targetProject, '6.0', 'True');
     // Put what's left as first thread.
     if (!empty($strings)) {
       $body = [
@@ -649,7 +655,7 @@ final class MigrateCommand extends Command {
         ],
         'status' => 1,
       ];
-      $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetRepo, '6.0');
+      $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetProject, '6.0');
     }
     return $prItem;
   }
@@ -686,7 +692,7 @@ final class MigrateCommand extends Command {
           ],
           'status' => 1,
         ];
-        $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetRepo, '6.0');
+        $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetProject, '6.0');
         $i++;
       }
       $page++;
@@ -728,7 +734,7 @@ final class MigrateCommand extends Command {
             ],
             'status' => 1,
           ];
-          $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetRepo, '6.0');
+          $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetProject, '6.0');
           $i++;
         }
 
@@ -773,7 +779,7 @@ final class MigrateCommand extends Command {
               ],
             ],
           ];
-          $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetRepo, '6.0');
+          $this->pullRequestThreadsApi->pullRequestThreadsCreate($this->targetOrg, json_encode($body, JSON_PRETTY_PRINT), $this->targetRepo, $prItem->getPullRequestId(), $this->targetProject, '6.0');
           $i++;
         }
       }
@@ -790,7 +796,7 @@ final class MigrateCommand extends Command {
    * @return string
    */
   private function buildWorkItemHtmlUrl(WorkItem $workItem): string {
-    return "{$this->targetHost}/{$this->targetOrg}/{$this->targetRepo}/_workitems/edit/{$workItem->getId()}";
+    return "{$this->targetHost}/{$this->targetOrg}/{$this->targetProject}/_workitems/edit/{$workItem->getId()}";
   }
 
   private function prepareDescription(string $body): string {
